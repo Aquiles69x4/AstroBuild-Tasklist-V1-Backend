@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
       params.push(status);
     }
 
-    query += ' ORDER BY created_at DESC';
+    query += ' ORDER BY display_order ASC NULLS LAST, created_at DESC';
 
     const result = await db.query(query, params);
     res.json(result.rows);
@@ -147,6 +147,56 @@ router.delete('/:id', async (req, res) => {
     res.json({ message: 'Car deleted successfully' });
   } catch (error) {
     console.error('Error deleting car:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Move car up or down in display order
+router.put('/:id/move', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { direction } = req.body;
+
+    if (!['up', 'down'].includes(direction)) {
+      return res.status(400).json({ error: 'Invalid direction. Must be "up" or "down"' });
+    }
+
+    // Get current car
+    const currentCar = await db.query('SELECT * FROM cars WHERE id = $1', [id]);
+    if (currentCar.rows.length === 0) {
+      return res.status(404).json({ error: 'Car not found' });
+    }
+
+    const currentOrder = currentCar.rows[0].display_order;
+
+    // Get adjacent car
+    const adjacentQuery = direction === 'up'
+      ? 'SELECT * FROM cars WHERE display_order < $1 ORDER BY display_order DESC LIMIT 1'
+      : 'SELECT * FROM cars WHERE display_order > $1 ORDER BY display_order ASC LIMIT 1';
+
+    const adjacentCar = await db.query(adjacentQuery, [currentOrder]);
+
+    if (adjacentCar.rows.length === 0) {
+      return res.json({ message: 'Car is already at the boundary' });
+    }
+
+    const adjacentOrder = adjacentCar.rows[0].display_order;
+
+    // Swap display_order values
+    await db.query('UPDATE cars SET display_order = $1 WHERE id = $2', [adjacentOrder, id]);
+    await db.query('UPDATE cars SET display_order = $1 WHERE id = $2', [currentOrder, adjacentCar.rows[0].id]);
+
+    // Get updated car
+    const updatedCar = await db.query('SELECT * FROM cars WHERE id = $1', [id]);
+
+    // Notify all clients
+    if (global.io) {
+      global.io.emit('car-moved', { id: parseInt(id), direction });
+    }
+
+    res.json({ message: 'Car moved successfully', car: updatedCar.rows[0] });
+  } catch (error) {
+    console.error('Error moving car:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

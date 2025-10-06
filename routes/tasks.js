@@ -40,6 +40,25 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Get priority tasks (red flags)
+router.get('/priority/list', async (req, res) => {
+  try {
+    const query = `
+      SELECT t.*, c.brand, c.model, c.year
+      FROM tasks t
+      LEFT JOIN cars c ON t.car_id = c.id
+      WHERE t.is_priority = 1 AND t.status != 'completed'
+      ORDER BY t.created_at DESC
+    `;
+
+    const result = await db.query(query);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching priority tasks:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get single task
 router.get('/:id', async (req, res) => {
   try {

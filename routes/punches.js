@@ -485,6 +485,59 @@ router.get('/summary/mechanic-cars', async (req, res) => {
   }
 });
 
+// Get individual car work sessions for a mechanic (for editing)
+router.get('/summary/mechanic-sessions/:mechanic_name', async (req, res) => {
+  try {
+    const { mechanic_name } = req.params;
+    const { start_date, end_date } = req.query;
+
+    // Get mechanic's last reset date
+    const mechanicResult = await db.query('SELECT last_reset_date FROM mechanics WHERE name = $1', [mechanic_name]);
+    const lastResetDate = mechanicResult.rows[0]?.last_reset_date;
+
+    // Get individual sessions
+    let sessionQuery = `
+      SELECT
+        cws.id,
+        cws.car_id,
+        cws.total_hours,
+        c.brand,
+        c.model,
+        c.year
+      FROM car_work_sessions cws
+      LEFT JOIN cars c ON cws.car_id = c.id
+      WHERE cws.end_time IS NOT NULL
+      AND cws.mechanic_name = $1
+    `;
+    const params = [mechanic_name];
+
+    // Filter by reset date if exists
+    if (lastResetDate) {
+      params.push(lastResetDate);
+      sessionQuery += ` AND cws.start_time > $${params.length}`;
+    }
+
+    if (start_date) {
+      params.push(start_date);
+      sessionQuery += ` AND DATE(cws.start_time) >= $${params.length}`;
+    }
+
+    if (end_date) {
+      params.push(end_date);
+      sessionQuery += ` AND DATE(cws.start_time) <= $${params.length}`;
+    }
+
+    sessionQuery += ' ORDER BY cws.car_id, cws.start_time DESC';
+
+    const result = await db.query(sessionQuery, params);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching mechanic sessions:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Reset hours for a mechanic (mark as paid)
 router.post('/reset-hours/:mechanic_name', async (req, res) => {
   try {
@@ -583,6 +636,40 @@ router.put('/:id/edit', async (req, res) => {
   }
 });
 
+// Delete all punches and car work sessions (admin function - for reset/cleanup)
+// MUST BE BEFORE /:id route
+router.delete('/delete-all', async (req, res) => {
+  try {
+    const { password } = req.body;
+
+    // Verify password
+    if (password !== 'hola123') {
+      return res.status(401).json({ error: 'Invalid password' });
+    }
+
+    // Delete all car work sessions first (foreign key constraint)
+    const sessionsResult = await db.query('DELETE FROM car_work_sessions RETURNING id');
+    const punchesResult = await db.query('DELETE FROM punches RETURNING id');
+
+    // Reset all mechanics' last_reset_date
+    await db.query('UPDATE mechanics SET last_reset_date = CURRENT_TIMESTAMP');
+
+    // Emit socket event
+    if (global.io) {
+      global.io.emit('all-data-cleared');
+    }
+
+    res.json({
+      message: 'All punches and car work sessions deleted successfully',
+      deleted_sessions: sessionsResult.rows.length,
+      deleted_punches: punchesResult.rows.length
+    });
+  } catch (error) {
+    console.error('Error deleting all data:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Delete punch (admin function)
 router.delete('/:id', async (req, res) => {
   try {
@@ -602,6 +689,44 @@ router.delete('/:id', async (req, res) => {
     res.json({ message: 'Punch deleted successfully', punch: result.rows[0] });
   } catch (error) {
     console.error('Error deleting punch:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update car work session hours (admin function)
+router.put('/car-sessions/:id/edit', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { total_hours, password } = req.body;
+
+    // Verify password
+    if (password !== 'hola123') {
+      return res.status(401).json({ error: 'Contraseña incorrecta' });
+    }
+
+    // Validate total_hours
+    if (total_hours === undefined || total_hours === null || total_hours < 0) {
+      return res.status(400).json({ error: 'Las horas deben ser un número positivo' });
+    }
+
+    // Update the car work session
+    const result = await db.query(
+      'UPDATE car_work_sessions SET total_hours = $1 WHERE id = $2 RETURNING *',
+      [total_hours, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Sesión de trabajo no encontrada' });
+    }
+
+    // Emit socket event
+    if (global.io) {
+      global.io.emit('car-session-updated', result.rows[0]);
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating car session:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

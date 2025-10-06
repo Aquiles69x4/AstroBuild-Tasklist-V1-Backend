@@ -11,6 +11,7 @@ const server = http.createServer(app);
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   "http://localhost:3000",
+  "http://localhost:3001",
   "http://localhost:4000",
   "https://astro-build-tasklist-frontend-30-2a.vercel.app"
 ].filter(Boolean);
