@@ -579,6 +579,92 @@ router.post('/reset-hours', async (req, res) => {
   }
 });
 
+// Reset all car hours (delete all completed work sessions)
+router.post('/reset-car-hours', async (req, res) => {
+  try {
+    const { password } = req.body;
+
+    // Verify password
+    if (password !== 'hola123') {
+      return res.status(401).json({ error: 'Invalid password' });
+    }
+
+    // Delete all completed car work sessions
+    const result = await db.query('DELETE FROM car_work_sessions WHERE end_time IS NOT NULL');
+
+    // Emit socket event
+    if (global.io) {
+      global.io.emit('car-hours-reset');
+    }
+
+    res.json({
+      message: 'All car hours reset successfully',
+      deleted_sessions: result.rowCount
+    });
+  } catch (error) {
+    console.error('Error resetting car hours:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update total hours for a specific car
+router.put('/car-hours/:car_id', async (req, res) => {
+  try {
+    const { car_id } = req.params;
+    const { total_hours, password } = req.body;
+
+    // Verify password
+    if (password !== 'hola123') {
+      return res.status(401).json({ error: 'Invalid password' });
+    }
+
+    // Get current total hours for this car
+    const currentResult = await db.query(
+      'SELECT SUM(total_hours) as current_total FROM car_work_sessions WHERE car_id = $1 AND end_time IS NOT NULL',
+      [car_id]
+    );
+
+    const currentTotal = parseFloat(currentResult.rows[0]?.current_total || 0);
+    const newTotal = parseFloat(total_hours);
+
+    if (currentTotal === 0) {
+      // If there are no sessions, we can't update anything
+      return res.json({
+        message: 'No hay sesiones de trabajo para actualizar',
+        car_id: parseInt(car_id),
+        old_total: 0,
+        new_total: 0,
+        ratio: 0
+      });
+    }
+
+    // Calculate the ratio to adjust all sessions proportionally
+    const ratio = newTotal / currentTotal;
+
+    // Update all sessions for this car proportionally
+    await db.query(
+      'UPDATE car_work_sessions SET total_hours = total_hours * $1 WHERE car_id = $2 AND end_time IS NOT NULL',
+      [ratio, car_id]
+    );
+
+    // Emit socket event
+    if (global.io) {
+      global.io.emit('car-hours-updated', { car_id, new_total: newTotal });
+    }
+
+    res.json({
+      message: 'Car hours updated successfully',
+      car_id: parseInt(car_id),
+      old_total: currentTotal,
+      new_total: newTotal,
+      ratio
+    });
+  } catch (error) {
+    console.error('Error updating car hours:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Update punch times (admin function)
 router.put('/:id/edit', async (req, res) => {
   try {
