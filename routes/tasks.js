@@ -149,11 +149,57 @@ router.put('/:id',
         return res.status(400).json({ error: 'No fields to update' });
       }
 
+      // Get the task before updating to check previous state
+      const previousTask = await db.query('SELECT * FROM tasks WHERE id = $1', [id]);
+      if (previousTask.rows.length === 0) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+      const oldTask = previousTask.rows[0];
+
+      // Handle 2-mechanic logic manually
+      let twoMechanics = [];
+      if (updateFields.assigned_mechanic && updateFields.assigned_mechanic.includes(',')) {
+        twoMechanics = updateFields.assigned_mechanic.split(',').map(m => m.trim());
+        console.log('Two mechanics detected:', twoMechanics);
+      }
+
       const fieldNames = Object.keys(updateFields);
       await db.query(
         `UPDATE tasks SET ${fieldNames.map((field, index) => `${field} = $${index + 1}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${fieldNames.length + 1}`,
         [...Object.values(updateFields), id]
       );
+
+      // If task is being completed with 2 mechanics, manually update points
+      if (updateFields.status === 'completed' && oldTask.status !== 'completed' && twoMechanics.length === 2) {
+        const pointsPerMechanic = oldTask.points / 2;
+        console.log(`Dividing ${oldTask.points} points between 2 mechanics: ${pointsPerMechanic} each`);
+
+        for (const mechanicName of twoMechanics) {
+          await db.query(`
+            UPDATE mechanics
+            SET total_points = total_points + $1,
+                total_tasks = total_tasks + 1
+            WHERE name = $2
+          `, [pointsPerMechanic, mechanicName]);
+          console.log(`Updated ${mechanicName} with ${pointsPerMechanic} points`);
+        }
+      }
+      // If task is being uncompleted with 2 mechanics, remove points
+      else if (oldTask.status === 'completed' && updateFields.status !== 'completed' && oldTask.assigned_mechanic && oldTask.assigned_mechanic.includes(',')) {
+        const previousMechanics = oldTask.assigned_mechanic.split(',').map(m => m.trim());
+        const pointsPerMechanic = oldTask.points / 2;
+        console.log(`Removing ${oldTask.points} points from 2 mechanics: ${pointsPerMechanic} each`);
+
+        for (const mechanicName of previousMechanics) {
+          await db.query(`
+            UPDATE mechanics
+            SET total_points = total_points - $1,
+                total_tasks = total_tasks - 1
+            WHERE name = $2
+          `, [pointsPerMechanic, mechanicName]);
+          console.log(`Removed ${pointsPerMechanic} points from ${mechanicName}`);
+        }
+      }
 
       // Get the updated task with car details
       const result = await db.query(`
