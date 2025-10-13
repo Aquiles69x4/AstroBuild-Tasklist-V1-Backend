@@ -169,35 +169,62 @@ router.put('/:id',
         [...Object.values(updateFields), id]
       );
 
-      // If task is being completed with 2 mechanics, manually update points
-      if (updateFields.status === 'completed' && oldTask.status !== 'completed' && twoMechanics.length === 2) {
-        const pointsPerMechanic = oldTask.points / 2;
-        console.log(`Dividing ${oldTask.points} points between 2 mechanics: ${pointsPerMechanic} each`);
+      // Handle points update manually for ALL cases (overrides triggers)
+      // Case 1: Task is being completed
+      if (updateFields.status === 'completed' && oldTask.status !== 'completed' && updateFields.assigned_mechanic) {
+        if (twoMechanics.length === 2) {
+          // Two mechanics: divide points
+          const pointsPerMechanic = oldTask.points / 2;
+          console.log(`Dividing ${oldTask.points} points between 2 mechanics: ${pointsPerMechanic} each`);
 
-        for (const mechanicName of twoMechanics) {
+          for (const mechanicName of twoMechanics) {
+            await db.query(`
+              UPDATE mechanics
+              SET total_points = total_points + $1,
+                  total_tasks = total_tasks + 1
+              WHERE name = $2
+            `, [pointsPerMechanic, mechanicName]);
+            console.log(`Updated ${mechanicName} with ${pointsPerMechanic} points`);
+          }
+        } else if (updateFields.assigned_mechanic && !updateFields.assigned_mechanic.includes(',')) {
+          // Single mechanic: full points (manually, trigger will be disabled)
+          console.log(`Assigning ${oldTask.points} points to single mechanic: ${updateFields.assigned_mechanic}`);
           await db.query(`
             UPDATE mechanics
             SET total_points = total_points + $1,
                 total_tasks = total_tasks + 1
             WHERE name = $2
-          `, [pointsPerMechanic, mechanicName]);
-          console.log(`Updated ${mechanicName} with ${pointsPerMechanic} points`);
+          `, [oldTask.points, updateFields.assigned_mechanic]);
+          console.log(`Updated ${updateFields.assigned_mechanic} with ${oldTask.points} points`);
         }
       }
-      // If task is being uncompleted with 2 mechanics, remove points
-      else if (oldTask.status === 'completed' && updateFields.status !== 'completed' && oldTask.assigned_mechanic && oldTask.assigned_mechanic.includes(',')) {
-        const previousMechanics = oldTask.assigned_mechanic.split(',').map(m => m.trim());
-        const pointsPerMechanic = oldTask.points / 2;
-        console.log(`Removing ${oldTask.points} points from 2 mechanics: ${pointsPerMechanic} each`);
+      // Case 2: Task is being uncompleted
+      else if (oldTask.status === 'completed' && updateFields.status !== 'completed' && oldTask.assigned_mechanic) {
+        if (oldTask.assigned_mechanic.includes(',')) {
+          // Two mechanics: remove divided points
+          const previousMechanics = oldTask.assigned_mechanic.split(',').map(m => m.trim());
+          const pointsPerMechanic = oldTask.points / 2;
+          console.log(`Removing ${oldTask.points} points from 2 mechanics: ${pointsPerMechanic} each`);
 
-        for (const mechanicName of previousMechanics) {
+          for (const mechanicName of previousMechanics) {
+            await db.query(`
+              UPDATE mechanics
+              SET total_points = total_points - $1,
+                  total_tasks = total_tasks - 1
+              WHERE name = $2
+            `, [pointsPerMechanic, mechanicName]);
+            console.log(`Removed ${pointsPerMechanic} points from ${mechanicName}`);
+          }
+        } else {
+          // Single mechanic: remove full points
+          console.log(`Removing ${oldTask.points} points from single mechanic: ${oldTask.assigned_mechanic}`);
           await db.query(`
             UPDATE mechanics
             SET total_points = total_points - $1,
                 total_tasks = total_tasks - 1
             WHERE name = $2
-          `, [pointsPerMechanic, mechanicName]);
-          console.log(`Removed ${pointsPerMechanic} points from ${mechanicName}`);
+          `, [oldTask.points, oldTask.assigned_mechanic]);
+          console.log(`Removed ${oldTask.points} points from ${oldTask.assigned_mechanic}`);
         }
       }
 
