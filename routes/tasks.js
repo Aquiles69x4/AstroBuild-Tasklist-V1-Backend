@@ -145,6 +145,10 @@ router.put('/:id',
       const { id } = req.params;
       const updateFields = req.body;
 
+      console.log(`\n========== UPDATE TASK ${id} START ==========`);
+      console.log('Request body:', JSON.stringify(updateFields));
+      console.log('Timestamp:', new Date().toISOString());
+
       if (Object.keys(updateFields).length === 0) {
         return res.status(400).json({ error: 'No fields to update' });
       }
@@ -189,13 +193,22 @@ router.put('/:id',
         } else if (updateFields.assigned_mechanic && !updateFields.assigned_mechanic.includes(',')) {
           // Single mechanic: full points (manually, trigger will be disabled)
           console.log(`Assigning ${oldTask.points} points to single mechanic: ${updateFields.assigned_mechanic}`);
+
+          // Check points BEFORE update
+          const beforeUpdate = await db.query('SELECT total_points, total_tasks FROM mechanics WHERE name = $1', [updateFields.assigned_mechanic]);
+          console.log(`BEFORE UPDATE: ${updateFields.assigned_mechanic} has ${beforeUpdate.rows[0]?.total_points || 0} points, ${beforeUpdate.rows[0]?.total_tasks || 0} tasks`);
+
           await db.query(`
             UPDATE mechanics
             SET total_points = total_points + $1,
                 total_tasks = total_tasks + 1
             WHERE name = $2
           `, [oldTask.points, updateFields.assigned_mechanic]);
-          console.log(`Updated ${updateFields.assigned_mechanic} with ${oldTask.points} points`);
+
+          // Check points AFTER update
+          const afterUpdate = await db.query('SELECT total_points, total_tasks FROM mechanics WHERE name = $1', [updateFields.assigned_mechanic]);
+          console.log(`AFTER UPDATE: ${updateFields.assigned_mechanic} has ${afterUpdate.rows[0]?.total_points || 0} points, ${afterUpdate.rows[0]?.total_tasks || 0} tasks`);
+          console.log(`Expected increase: +${oldTask.points} points, Actual increase: +${(afterUpdate.rows[0]?.total_points || 0) - (beforeUpdate.rows[0]?.total_points || 0)} points`);
         }
       }
       // Case 2: Task is being uncompleted
@@ -246,6 +259,8 @@ router.put('/:id',
       if (global.io) {
         global.io.emit('task-updated', updatedTask);
       }
+
+      console.log(`========== UPDATE TASK ${id} END ==========\n`);
 
       res.json(updatedTask);
     } catch (error) {
