@@ -160,43 +160,62 @@ router.put('/:id',
       }
       const oldTask = previousTask.rows[0];
 
-      // Handle 2-mechanic logic manually
+      // Handle 2-mechanic logic detection
       let twoMechanics = [];
+      let isTwoMechanicsMode = false;
       if (updateFields.assigned_mechanic && updateFields.assigned_mechanic.includes(',')) {
         twoMechanics = updateFields.assigned_mechanic.split(',').map(m => m.trim());
-        console.log('Two mechanics detected:', twoMechanics);
+        isTwoMechanicsMode = twoMechanics.length === 2;
+        console.log('🔧 Two mechanics detected:', twoMechanics);
+        console.log('🔧 isTwoMechanicsMode:', isTwoMechanicsMode);
       }
 
-      const fieldNames = Object.keys(updateFields);
-      await db.query(
-        `UPDATE tasks SET ${fieldNames.map((field, index) => `${field} = $${index + 1}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${fieldNames.length + 1}`,
-        [...Object.values(updateFields), id]
-      );
+      // ==================================================
+      // STEP 1: UPDATE MECHANIC POINTS FIRST (BEFORE updating task)
+      // ==================================================
 
-      // Handle points update manually for ALL cases (overrides triggers)
       // Case 1: Task is being completed
       if (updateFields.status === 'completed' && oldTask.status !== 'completed' && updateFields.assigned_mechanic) {
-        if (twoMechanics.length === 2) {
-          // Two mechanics: divide points
+        console.log('📊 Task is being COMPLETED, updating points...');
+
+        if (isTwoMechanicsMode && twoMechanics.length === 2) {
+          // ✅ TWO MECHANICS: divide points
           const pointsPerMechanic = oldTask.points / 2;
-          console.log(`Dividing ${oldTask.points} points between 2 mechanics: ${pointsPerMechanic} each`);
+          console.log(`👥 TWO MECHANICS MODE: Dividing ${oldTask.points} points → ${pointsPerMechanic} points each`);
 
           for (const mechanicName of twoMechanics) {
+            console.log(`  🔄 Updating ${mechanicName}...`);
+
+            // Get points BEFORE
+            const beforeUpdate = await db.query('SELECT total_points, total_tasks FROM mechanics WHERE name = $1', [mechanicName]);
+            const pointsBefore = beforeUpdate.rows[0]?.total_points || 0;
+            const tasksBefore = beforeUpdate.rows[0]?.total_tasks || 0;
+            console.log(`    BEFORE: ${pointsBefore} points, ${tasksBefore} tasks`);
+
+            // Update mechanic
             await db.query(`
               UPDATE mechanics
               SET total_points = total_points + $1,
                   total_tasks = total_tasks + 1
               WHERE name = $2
             `, [pointsPerMechanic, mechanicName]);
-            console.log(`Updated ${mechanicName} with ${pointsPerMechanic} points`);
+
+            // Get points AFTER
+            const afterUpdate = await db.query('SELECT total_points, total_tasks FROM mechanics WHERE name = $1', [mechanicName]);
+            const pointsAfter = afterUpdate.rows[0]?.total_points || 0;
+            const tasksAfter = afterUpdate.rows[0]?.total_tasks || 0;
+            console.log(`    AFTER: ${pointsAfter} points, ${tasksAfter} tasks`);
+            console.log(`    ✅ ${mechanicName} received +${pointsPerMechanic} points`);
           }
+          console.log('✅ TWO MECHANICS: Points updated successfully!');
+
         } else if (updateFields.assigned_mechanic && !updateFields.assigned_mechanic.includes(',')) {
-          // Single mechanic: full points (manually, trigger will be disabled)
-          console.log(`Assigning ${oldTask.points} points to single mechanic: ${updateFields.assigned_mechanic}`);
+          // ✅ SINGLE MECHANIC: full points
+          console.log(`👤 SINGLE MECHANIC MODE: Assigning ${oldTask.points} full points to ${updateFields.assigned_mechanic}`);
 
           // Check points BEFORE update
           const beforeUpdate = await db.query('SELECT total_points, total_tasks FROM mechanics WHERE name = $1', [updateFields.assigned_mechanic]);
-          console.log(`BEFORE UPDATE: ${updateFields.assigned_mechanic} has ${beforeUpdate.rows[0]?.total_points || 0} points, ${beforeUpdate.rows[0]?.total_tasks || 0} tasks`);
+          console.log(`  BEFORE: ${updateFields.assigned_mechanic} has ${beforeUpdate.rows[0]?.total_points || 0} points, ${beforeUpdate.rows[0]?.total_tasks || 0} tasks`);
 
           await db.query(`
             UPDATE mechanics
@@ -207,17 +226,20 @@ router.put('/:id',
 
           // Check points AFTER update
           const afterUpdate = await db.query('SELECT total_points, total_tasks FROM mechanics WHERE name = $1', [updateFields.assigned_mechanic]);
-          console.log(`AFTER UPDATE: ${updateFields.assigned_mechanic} has ${afterUpdate.rows[0]?.total_points || 0} points, ${afterUpdate.rows[0]?.total_tasks || 0} tasks`);
-          console.log(`Expected increase: +${oldTask.points} points, Actual increase: +${(afterUpdate.rows[0]?.total_points || 0) - (beforeUpdate.rows[0]?.total_points || 0)} points`);
+          console.log(`  AFTER: ${updateFields.assigned_mechanic} has ${afterUpdate.rows[0]?.total_points || 0} points, ${afterUpdate.rows[0]?.total_tasks || 0} tasks`);
+          console.log(`  Expected increase: +${oldTask.points} points, Actual increase: +${(afterUpdate.rows[0]?.total_points || 0) - (beforeUpdate.rows[0]?.total_points || 0)} points`);
+          console.log('✅ SINGLE MECHANIC: Points updated successfully!');
         }
       }
       // Case 2: Task is being uncompleted
       else if (oldTask.status === 'completed' && updateFields.status !== 'completed' && oldTask.assigned_mechanic) {
+        console.log('📊 Task is being UNCOMPLETED, removing points...');
+
         if (oldTask.assigned_mechanic.includes(',')) {
           // Two mechanics: remove divided points
           const previousMechanics = oldTask.assigned_mechanic.split(',').map(m => m.trim());
           const pointsPerMechanic = oldTask.points / 2;
-          console.log(`Removing ${oldTask.points} points from 2 mechanics: ${pointsPerMechanic} each`);
+          console.log(`👥 Removing ${oldTask.points} points from 2 mechanics: ${pointsPerMechanic} each`);
 
           for (const mechanicName of previousMechanics) {
             await db.query(`
@@ -226,22 +248,35 @@ router.put('/:id',
                   total_tasks = total_tasks - 1
               WHERE name = $2
             `, [pointsPerMechanic, mechanicName]);
-            console.log(`Removed ${pointsPerMechanic} points from ${mechanicName}`);
+            console.log(`  ✅ Removed ${pointsPerMechanic} points from ${mechanicName}`);
           }
         } else {
           // Single mechanic: remove full points
-          console.log(`Removing ${oldTask.points} points from single mechanic: ${oldTask.assigned_mechanic}`);
+          console.log(`👤 Removing ${oldTask.points} points from single mechanic: ${oldTask.assigned_mechanic}`);
           await db.query(`
             UPDATE mechanics
             SET total_points = total_points - $1,
                 total_tasks = total_tasks - 1
             WHERE name = $2
           `, [oldTask.points, oldTask.assigned_mechanic]);
-          console.log(`Removed ${oldTask.points} points from ${oldTask.assigned_mechanic}`);
+          console.log(`  ✅ Removed ${oldTask.points} points from ${oldTask.assigned_mechanic}`);
         }
       }
 
-      // Get the updated task with car details
+      // ==================================================
+      // STEP 2: UPDATE TASK (AFTER points are updated)
+      // ==================================================
+      console.log('📝 Updating task in database...');
+      const fieldNames = Object.keys(updateFields);
+      await db.query(
+        `UPDATE tasks SET ${fieldNames.map((field, index) => `${field} = $${index + 1}`).join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${fieldNames.length + 1}`,
+        [...Object.values(updateFields), id]
+      );
+      console.log('✅ Task updated in database');
+
+      // ==================================================
+      // STEP 3: GET UPDATED TASK and EMIT SOCKET EVENT
+      // ==================================================
       const result = await db.query(`
         SELECT t.*, c.brand, c.model, c.year
         FROM tasks t
@@ -255,7 +290,8 @@ router.put('/:id',
 
       const updatedTask = result.rows[0];
 
-      // Notify all clients
+      // Notify all clients (AFTER everything is done)
+      console.log('📡 Emitting socket event: task-updated');
       if (global.io) {
         global.io.emit('task-updated', updatedTask);
       }
