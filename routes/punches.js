@@ -170,6 +170,136 @@ router.put('/punch-out/:id', async (req, res) => {
   }
 });
 
+// Pause punch (for lunch breaks)
+router.post('/:id/pause', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    // Get the punch to verify it's active and not already paused
+    const punchResult = await db.query(
+      'SELECT * FROM punches WHERE id = $1',
+      [id]
+    );
+
+    if (punchResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Punch not found' });
+    }
+
+    const punch = punchResult.rows[0];
+
+    if (punch.status !== 'active') {
+      return res.status(400).json({ error: 'Can only pause active punches' });
+    }
+
+    if (punch.current_pause_start) {
+      return res.status(400).json({ error: 'Punch is already paused' });
+    }
+
+    // Update punch with pause start time
+    const updateResult = await db.query(
+      `UPDATE punches
+       SET current_pause_start = CURRENT_TIMESTAMP
+       WHERE id = $1
+       RETURNING *`,
+      [id]
+    );
+
+    // Create pause history record
+    await db.query(
+      `INSERT INTO punch_pauses (punch_id, pause_start, reason)
+       VALUES ($1, CURRENT_TIMESTAMP, $2)`,
+      [id, reason || 'lunch']
+    );
+
+    // Emit socket event
+    if (global.io) {
+      global.io.emit('punch-paused', updateResult.rows[0]);
+    }
+
+    res.json(updateResult.rows[0]);
+  } catch (error) {
+    console.error('Error pausing punch:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Resume punch (after lunch break)
+router.post('/:id/resume', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get the punch to verify it's paused
+    const punchResult = await db.query(
+      'SELECT * FROM punches WHERE id = $1',
+      [id]
+    );
+
+    if (punchResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Punch not found' });
+    }
+
+    const punch = punchResult.rows[0];
+
+    if (!punch.current_pause_start) {
+      return res.status(400).json({ error: 'Punch is not paused' });
+    }
+
+    // Calculate pause duration in seconds
+    const pauseStart = new Date(punch.current_pause_start);
+    const pauseEnd = new Date();
+    const pauseDurationSeconds = Math.floor((pauseEnd - pauseStart) / 1000);
+
+    // Update punch: add to total paused time and clear current pause
+    const updateResult = await db.query(
+      `UPDATE punches
+       SET total_paused_seconds = total_paused_seconds + $1,
+           current_pause_start = NULL
+       WHERE id = $2
+       RETURNING *`,
+      [pauseDurationSeconds, id]
+    );
+
+    // Update the pause history record with end time and duration
+    await db.query(
+      `UPDATE punch_pauses
+       SET pause_end = CURRENT_TIMESTAMP,
+           duration_seconds = $1
+       WHERE punch_id = $2 AND pause_end IS NULL`,
+      [pauseDurationSeconds, id]
+    );
+
+    // Emit socket event
+    if (global.io) {
+      global.io.emit('punch-resumed', updateResult.rows[0]);
+    }
+
+    res.json(updateResult.rows[0]);
+  } catch (error) {
+    console.error('Error resuming punch:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get pause history for a punch
+router.get('/:id/pauses', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await db.query(
+      `SELECT * FROM punch_pauses
+       WHERE punch_id = $1
+       ORDER BY pause_start DESC`,
+      [id]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching pause history:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get all car work sessions
 router.get('/car-sessions', async (req, res) => {
   try {
@@ -618,34 +748,49 @@ router.put('/car-hours/:car_id', async (req, res) => {
       return res.status(401).json({ error: 'Invalid password' });
     }
 
-    // Get current total hours for this car
-    const currentResult = await db.query(
-      'SELECT SUM(total_hours) as current_total FROM car_work_sessions WHERE car_id = $1 AND end_time IS NOT NULL',
+    // Get all sessions for this car with their current hours
+    const sessionsResult = await db.query(
+      'SELECT id, total_hours FROM car_work_sessions WHERE car_id = $1 AND end_time IS NOT NULL',
       [car_id]
     );
 
-    const currentTotal = parseFloat(currentResult.rows[0]?.current_total || 0);
-    const newTotal = parseFloat(total_hours);
-
-    if (currentTotal === 0) {
+    if (sessionsResult.rows.length === 0) {
       // If there are no sessions, we can't update anything
       return res.json({
         message: 'No hay sesiones de trabajo para actualizar',
         car_id: parseInt(car_id),
         old_total: 0,
         new_total: 0,
-        ratio: 0
+        sessions_updated: 0
       });
     }
 
-    // Calculate the ratio to adjust all sessions proportionally
-    const ratio = newTotal / currentTotal;
+    // Calculate current total
+    const currentTotal = sessionsResult.rows.reduce((sum, s) => sum + parseFloat(s.total_hours || 0), 0);
+    const newTotal = parseFloat(total_hours);
 
-    // Update all sessions for this car proportionally
-    await db.query(
-      'UPDATE car_work_sessions SET total_hours = total_hours * $1 WHERE car_id = $2 AND end_time IS NOT NULL',
-      [ratio, car_id]
-    );
+    if (currentTotal === 0) {
+      return res.json({
+        message: 'El total actual es 0, no se puede redistribuir',
+        car_id: parseInt(car_id),
+        old_total: 0,
+        new_total: 0,
+        sessions_updated: 0
+      });
+    }
+
+    // Update each session proportionally based on its share of the original total
+    // This prevents cumulative multiplication by always working from the current values
+    for (const session of sessionsResult.rows) {
+      const currentHours = parseFloat(session.total_hours || 0);
+      const proportion = currentHours / currentTotal;
+      const newHours = proportion * newTotal;
+
+      await db.query(
+        'UPDATE car_work_sessions SET total_hours = $1 WHERE id = $2',
+        [newHours, session.id]
+      );
+    }
 
     // Emit socket event
     if (global.io) {
@@ -657,7 +802,7 @@ router.put('/car-hours/:car_id', async (req, res) => {
       car_id: parseInt(car_id),
       old_total: currentTotal,
       new_total: newTotal,
-      ratio
+      sessions_updated: sessionsResult.rows.length
     });
   } catch (error) {
     console.error('Error updating car hours:', error);
